@@ -1,7 +1,13 @@
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import seaborn as sns
 import matplotlib.pyplot as plt
+
+import torch
+import torch.nn as nn
+from sklearn.preprocessing import MinMaxScaler
+
 
 # Function to fetch BTC data and flatten columns
 def get_btc_data(ticker='BTC-USD', period='1y', interval='1d'):
@@ -15,6 +21,41 @@ def get_btc_data(ticker='BTC-USD', period='1y', interval='1d'):
 
     return data
 
+
+# Function to filter data by timeframe
+def filter_by_timeframe(data, timeframe='daily'):
+    data['Date'] = pd.to_datetime(data['Date'])  # Convert date column to datetime if not already
+
+    if timeframe == 'weekly':
+        return data.resample('W', on='Date').agg(
+            {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).reset_index()
+    elif timeframe == 'monthly':
+        return data.resample('M', on='Date').agg(
+            {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).reset_index()
+    else:
+        return data  # Return daily data if no timeframe is selected
+
+
+# Simple Moving Average (SMA)
+def add_sma(data, window=7):
+    data[f'SMA_{window}'] = data['Close'].rolling(window=window).mean()
+    return data
+
+
+# Relative Strength Index (RSI)
+def add_rsi(data, window=14):
+    delta = data['Close'].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+
+    avg_gain = pd.Series(gain).rolling(window=window).mean()
+    avg_loss = pd.Series(loss).rolling(window=window).mean()
+
+    rs = avg_gain / avg_loss
+    data['RSI'] = 100 - (100 / (1 + rs))
+    return data
+
+
 # Function to plot Close price using seaborn
 def plot_ohlc(data):
     plt.figure(figsize=(12, 6))
@@ -25,8 +66,68 @@ def plot_ohlc(data):
     plt.legend()
     plt.show()
 
+
+# Create sequences for LSTM
+def create_sequences(data, seq_length=50):
+    sequences = []
+    labels = []
+    for i in range(len(data) - seq_length):
+        seq = data[i:i + seq_length]
+        label = data[i + seq_length]
+        sequences.append(seq)
+        labels.append(label)
+    return torch.tensor(sequences, dtype=torch.float32), torch.tensor(labels, dtype=torch.float32)
+
+
+# LSTM Model Class
+class LSTMModel(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers):
+        super(LSTMModel, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, 1)  # Fully connected layer for final output
+
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        out = self.fc(out[:, -1, :])  # Get last time step output
+        return out
+
+
 # Main program
 btc_data = get_btc_data()  # Fetch BTC data
 print(btc_data.head())  # Print the first 5 rows to confirm structure
-plot_ohlc(btc_data)  # Plot Close prices
 
+# Apply filtering for the presentation:
+filtered_btc_data = filter_by_timeframe(btc_data, timeframe='weekly')  # Options: 'daily', 'weekly', 'monthly'
+plot_ohlc(filtered_btc_data)  # Plot the filtered data (e.g., weekly prices)
+
+btc_data = add_sma(btc_data, window=7)  # Add 7-day Simple Moving Average
+btc_data = add_rsi(btc_data, window=14)  # Add 14-day RSI
+
+# Normalize the data
+scaler = MinMaxScaler()
+btc_data['Close'] = scaler.fit_transform(btc_data[['Close']])  # Normalize Close prices
+
+# Create LSTM input sequences
+seq_length = 50
+sequences, labels = create_sequences(btc_data['Close'].values, seq_length=seq_length)
+
+# Initialize and train the model
+model = LSTMModel(input_size=1, hidden_size=64, num_layers=2)
+criterion = nn.MSELoss()  # Mean Squared Error Loss
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+# Training loop
+epochs = 10
+for epoch in range(epochs):
+    model.train()
+    optimizer.zero_grad()
+
+    # Forward pass
+    predictions = model(sequences.unsqueeze(-1))
+    loss = criterion(predictions, labels.unsqueeze(-1))
+
+    # Backward pass
+    loss.backward()
+    optimizer.step()
+
+    print(f'Epoch {epoch + 1}, Loss: {loss.item()}')
