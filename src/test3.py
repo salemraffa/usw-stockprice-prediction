@@ -3,6 +3,7 @@ import numpy as np
 import yfinance as yf
 import seaborn as sns
 import matplotlib.pyplot as plt
+from pytrends.request import TrendReq
 
 import torch
 import torch.nn as nn
@@ -20,6 +21,17 @@ def get_btc_data(ticker='BTC-USD', period='1y', interval='1d'):
         data.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']  # Rename columns
 
     return data
+
+
+# Function to fetch Google Trends data for a specific keyword
+def get_google_trends_data(keyword='bitcoin', timeframe='today 12-m'):
+    pytrends = TrendReq()
+    pytrends.build_payload(kw_list=[keyword], timeframe=timeframe)
+    trends_data = pytrends.interest_over_time()  # Get interest over time
+    trends_data.reset_index(inplace=True)
+    trends_data = trends_data[['date', keyword]]  # Keep only date and interest columns
+    trends_data.columns = ['Date', 'Interest']  # Rename columns for clarity
+    return trends_data
 
 
 # Function to filter data by timeframe
@@ -72,8 +84,8 @@ def create_sequences(data, seq_length=50):
     sequences = []
     labels = []
     for i in range(len(data) - seq_length):
-        seq = data[i:i + seq_length]
-        label = data[i + seq_length]
+        seq = data[i:i + seq_length, :-1]  # Include both Close price and Interest
+        label = data[i + seq_length, 0]  # Label is still the Close price
         sequences.append(seq)
         labels.append(label)
     return torch.tensor(sequences, dtype=torch.float32), torch.tensor(labels, dtype=torch.float32)
@@ -94,6 +106,26 @@ class LSTMModel(nn.Module):
 
 # Main program
 btc_data = get_btc_data()  # Fetch BTC data
+
+
+# Fetch Google Trends data
+trends_data = get_google_trends_data('bitcoin', timeframe='today 12-m')
+print(trends_data.head())  # Check first 5 rows of trends data
+
+# Merge BTC data and Google Trends data
+btc_data = pd.merge(btc_data, trends_data, on='Date', how='inner')  # Merge on Date
+print(btc_data.head())  # Confirm Interest column is added
+
+
+plt.figure(figsize=(12, 6))
+sns.lineplot(x='Date', y='Close', data=btc_data, label='BTC Close Price')
+sns.lineplot(x='Date', y='Interest', data=btc_data, label='Google Search Interest', color='orange')
+plt.title('BTC Price vs Google Search Interest')
+plt.xlabel('Date')
+plt.ylabel('Value')
+plt.legend()
+plt.show()
+
 print(btc_data.head())  # Print the first 5 rows to confirm structure
 
 # Apply filtering for the presentation:
@@ -107,9 +139,10 @@ btc_data = add_rsi(btc_data, window=14)  # Add 14-day RSI
 scaler = MinMaxScaler()
 btc_data['Close'] = scaler.fit_transform(btc_data[['Close']])  # Normalize Close prices
 
-# Create LSTM input sequences
+# Create LSTM input sequences (with Close and Interest as features)
 seq_length = 50
-sequences, labels = create_sequences(btc_data['Close'].values, seq_length=seq_length)
+sequences, labels = create_sequences(btc_data[['Close', 'Interest']].values, seq_length=seq_length)
+
 
 # Initialize and train the model
 model = LSTMModel(input_size=1, hidden_size=64, num_layers=2)
